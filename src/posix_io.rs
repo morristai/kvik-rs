@@ -191,8 +191,7 @@ fn posix_host_io(
         // Determine if this segment should use Direct I/O.
         // Direct I/O requires: page-aligned offset AND at least one full page of data.
         let offset_aligned = is_aligned(offset_usize, ps);
-        let use_dio_for_segment =
-            can_direct_io && offset_aligned && remaining >= ps;
+        let use_dio_for_segment = can_direct_io && offset_aligned && remaining >= ps;
 
         if use_dio_for_segment {
             // How many full pages can we transfer?
@@ -204,7 +203,15 @@ fn posix_host_io(
             let transferred = if buf_aligned {
                 // Best case: both offset and buffer aligned, use Direct I/O directly.
                 // SAFETY: current_buf is valid for dio_size bytes, fd_direct_on is valid.
-                unsafe { do_io(op, fd_direct_on, current_buf, dio_size, current_offset as i64)? }
+                unsafe {
+                    do_io(
+                        op,
+                        fd_direct_on,
+                        current_buf,
+                        dio_size,
+                        current_offset as i64,
+                    )?
+                }
             } else {
                 // Buffer not aligned: use a page-aligned bounce buffer.
                 let chunk_size = std::cmp::min(dio_size, bounce_buffer_size());
@@ -347,11 +354,7 @@ fn alloc_page_aligned(size: usize) -> Vec<u8> {
 ///
 /// Returns the file descriptor, or an error.
 pub fn posix_open(path: &std::path::Path, flags: i32, mode: u32) -> Result<RawFd> {
-    let c_path = std::ffi::CString::new(
-        path.as_os_str()
-            .as_encoded_bytes(),
-    )
-    .map_err(|_| {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
         Error::new(
             ErrorKind::ConfigInvalid,
             format!("path contains null byte: {}", path.display()),
@@ -399,10 +402,7 @@ pub fn file_size(fd: RawFd) -> Result<u64> {
         let errno = unsafe { *libc::__errno_location() };
         Err(Error::new(
             ErrorKind::SystemError,
-            format!(
-                "fstat failed: {}",
-                std::io::Error::from_raw_os_error(errno)
-            ),
+            format!("fstat failed: {}", std::io::Error::from_raw_os_error(errno)),
         )
         .with_operation("file_size"))
     } else {
@@ -419,8 +419,12 @@ mod tests {
 
     #[test]
     fn test_open_nonexistent_file() {
-        let err = posix_open(std::path::Path::new("/nonexistent/path/file.bin"), libc::O_RDONLY, 0)
-            .unwrap_err();
+        let err = posix_open(
+            std::path::Path::new("/nonexistent/path/file.bin"),
+            libc::O_RDONLY,
+            0,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 
@@ -514,16 +518,14 @@ mod tests {
 
         // Write using buffered I/O (no Direct I/O)
         let fd = posix_open(path, libc::O_WRONLY, 0).unwrap();
-        let written =
-            posix_host_write(fd, fd, &data, 0, PartialIO::No, false).unwrap();
+        let written = posix_host_write(fd, fd, &data, 0, PartialIO::No, false).unwrap();
         assert_eq!(written, data.len());
         posix_close(fd);
 
         // Read back
         let fd = posix_open(path, libc::O_RDONLY, 0).unwrap();
         let mut read_buf = vec![0u8; data.len()];
-        let read =
-            posix_host_read(fd, fd, &mut read_buf, 0, PartialIO::No, false).unwrap();
+        let read = posix_host_read(fd, fd, &mut read_buf, 0, PartialIO::No, false).unwrap();
         assert_eq!(read, data.len());
         assert_eq!(read_buf, data);
         posix_close(fd);
@@ -577,15 +579,14 @@ mod tests {
             libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_DIRECT,
             0o644,
         );
-        let fd_buffered = posix_open(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)
-            .unwrap();
+        let fd_buffered =
+            posix_open(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644).unwrap();
 
         match fd_direct {
             Ok(fd_dio) => {
                 // Write with Direct I/O support
                 let written =
-                    posix_host_write(fd_dio, fd_buffered, &data, 0, PartialIO::No, true)
-                        .unwrap();
+                    posix_host_write(fd_dio, fd_buffered, &data, 0, PartialIO::No, true).unwrap();
                 assert_eq!(written, data.len());
                 posix_close(fd_dio);
                 posix_close(fd_buffered);
@@ -595,8 +596,7 @@ mod tests {
                 let fd_buf = posix_open(path, libc::O_RDONLY, 0).unwrap();
                 let mut read_buf = vec![0u8; data_size];
                 let n =
-                    posix_host_read(fd_dio, fd_buf, &mut read_buf, 0, PartialIO::No, true)
-                        .unwrap();
+                    posix_host_read(fd_dio, fd_buf, &mut read_buf, 0, PartialIO::No, true).unwrap();
                 assert_eq!(n, data_size);
                 assert_eq!(read_buf, data);
                 posix_close(fd_dio);

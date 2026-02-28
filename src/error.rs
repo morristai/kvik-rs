@@ -20,6 +20,7 @@
 //!     .set_temporary();
 //! ```
 
+use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt;
 
 /// A specialized `Result` type for kvik-rs operations.
@@ -65,8 +66,13 @@ impl ErrorKind {
         }
     }
 
-    #[allow(dead_code)]
-    fn enable_backtrace(self) -> bool {
+    /// Whether to capture a backtrace for this error kind.
+    ///
+    /// Capturing a backtrace is expensive at runtime. We only capture it for
+    /// kinds where the call site is likely to be surprising (e.g., `Unexpected`).
+    ///
+    /// See <https://github.com/apache/opendal/discussions/5569>
+    fn enable_backtrace(&self) -> bool {
         matches!(self, ErrorKind::Unexpected)
     }
 }
@@ -110,12 +116,17 @@ pub struct Error {
     operation: &'static str,
     context: Vec<(&'static str, String)>,
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    backtrace: Option<Box<Backtrace>>,
 }
 
 impl Error {
     /// Create a new error with the given kind and message.
     ///
     /// Defaults to `ErrorStatus::Permanent` and empty operation/context.
+    ///
+    /// For [`ErrorKind::Unexpected`], a backtrace is captured if `RUST_BACKTRACE`
+    /// is enabled. For other kinds, backtrace capture is skipped to avoid the
+    /// runtime cost.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -124,6 +135,13 @@ impl Error {
             operation: "",
             context: Vec::new(),
             source: None,
+            // `Backtrace::capture()` checks if backtrace is enabled internally.
+            // It's zero cost when `RUST_BACKTRACE` is not set.
+            backtrace: kind
+                .enable_backtrace()
+                .then(Backtrace::capture)
+                .filter(|bt| bt.status() == BacktraceStatus::Captured)
+                .map(Box::new),
         }
     }
 
@@ -191,8 +209,7 @@ impl Error {
     /// into context as `("called", previous_operation)`.
     pub fn with_operation(mut self, operation: &'static str) -> Self {
         if !self.operation.is_empty() {
-            self.context
-                .push(("called", self.operation.to_string()));
+            self.context.push(("called", self.operation.to_string()));
         }
         self.operation = operation;
         self
@@ -208,6 +225,16 @@ impl Error {
     pub fn set_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         self.source = Some(Box::new(source));
         self
+    }
+
+    /// Returns the captured backtrace, if any.
+    ///
+    /// Backtraces are only captured for [`ErrorKind::Unexpected`] and only when
+    /// `RUST_BACKTRACE=1` (or `full`) is set.
+    ///
+    /// To print the backtrace, use `Debug` formatting: `format!("{err:?}")`.
+    pub fn backtrace(&self) -> Option<&Backtrace> {
+        self.backtrace.as_deref()
     }
 }
 
@@ -241,6 +268,11 @@ impl fmt::Debug for Error {
                 writeln!(f)?;
                 writeln!(f, "Source:")?;
                 writeln!(f, "   {source}")?;
+            }
+            if let Some(backtrace) = &self.backtrace {
+                writeln!(f)?;
+                writeln!(f, "Backtrace:")?;
+                writeln!(f, "{backtrace}")?;
             }
             Ok(())
         }
@@ -474,5 +506,33 @@ mod tests {
         // Error should be Send (source is Send + Sync) but not necessarily Sync
         // due to Box<dyn Error + Send + Sync> which is Send but potentially not Sync.
         assert_send_sync::<Error>();
+    }
+
+    #[test]
+    fn test_backtrace_not_captured_for_non_unexpected() {
+        // Non-Unexpected kinds should never capture a backtrace.
+        let err = Error::new(ErrorKind::NotFound, "file missing");
+        assert!(err.backtrace().is_none());
+
+        let err = Error::new(ErrorKind::SystemError, "pread failed");
+        assert!(err.backtrace().is_none());
+
+        let err = Error::new(ErrorKind::CuFileError, "driver init failed");
+        assert!(err.backtrace().is_none());
+    }
+
+    #[test]
+    fn test_backtrace_captured_for_unexpected_when_enabled() {
+        // When RUST_BACKTRACE is set, Unexpected errors should capture a backtrace.
+        // SAFETY: test runs single-threaded; no other thread reads this env var concurrently.
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        let err = Error::new(ErrorKind::Unexpected, "internal error");
+
+        // The backtrace should be captured.
+        assert!(err.backtrace().is_some());
+
+        // Debug output should contain the backtrace.
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Backtrace:"));
     }
 }

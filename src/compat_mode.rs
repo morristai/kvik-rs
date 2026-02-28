@@ -127,7 +127,9 @@ mod tests {
 
     #[test]
     fn test_parse_off_variants() {
-        for s in &["OFF", "off", "Off", "FALSE", "false", "False", "NO", "no", "0"] {
+        for s in &[
+            "OFF", "off", "Off", "FALSE", "false", "False", "NO", "no", "0",
+        ] {
             assert_eq!(
                 CompatMode::parse(s).unwrap(),
                 CompatMode::Off,

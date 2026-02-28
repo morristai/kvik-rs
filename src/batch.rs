@@ -19,8 +19,9 @@ use cudarc::cufile::result::{
     batch_io_cancel, batch_io_destroy, batch_io_get_status, batch_io_setup, batch_io_submit,
 };
 use cudarc::cufile::sys::{
-    timespec, CUfileBatchHandle_t, CUfileBatchMode_t, CUfileIOEvents_t, CUfileIOParams_t,
-    CUfileIOParams__bindgen_ty_1__bindgen_ty_1, CUfileOpcode, CUfileStatus_t,
+    timespec, CUfileBatchHandle_t, CUfileBatchMode_t,
+    CUfileIOEvents_t, CUfileIOParams__bindgen_ty_1__bindgen_ty_1, CUfileIOParams_t, CUfileOpcode,
+    CUfileStatus_t,
 };
 
 use crate::error::{Error, ErrorKind, Result};
@@ -208,19 +209,18 @@ impl BatchHandle {
         };
 
         let mut nr = max_nr;
-        let mut events =
-            vec![unsafe { std::mem::zeroed::<CUfileIOEvents_t>() }; max_nr as usize];
+        let mut events = vec![unsafe { std::mem::zeroed::<CUfileIOEvents_t>() }; max_nr as usize];
 
         // SAFETY: handle is valid, events buffer is correctly sized,
         // nr is passed by mutable reference to receive actual count.
         unsafe {
             batch_io_get_status(self.handle, min_nr, &mut nr, &mut events, &ts).map_err(|e| {
-                    Error::new(
-                        ErrorKind::CuFileError,
-                        format!("batch_io_get_status failed: {e}"),
-                    )
-                    .with_operation("BatchHandle::status")
-                })?;
+                Error::new(
+                    ErrorKind::CuFileError,
+                    format!("batch_io_get_status failed: {e}"),
+                )
+                .with_operation("BatchHandle::status")
+            })?;
         }
 
         let result = events[..nr as usize]

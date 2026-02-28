@@ -59,11 +59,7 @@ unsafe impl Allocator for PageAligned {
         // SAFETY: ps is a valid alignment (power of 2, multiple of sizeof(void*)),
         // size > 0 for our usage.
         let ret = unsafe { libc::posix_memalign(&mut ptr, ps, size) };
-        if ret != 0 {
-            None
-        } else {
-            Some(ptr as *mut u8)
-        }
+        if ret != 0 { None } else { Some(ptr as *mut u8) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _size: usize) {
@@ -109,7 +105,10 @@ impl<A: Allocator> BounceBufferPool<A> {
     pub fn get(&self) -> BounceBuffer<'_, A> {
         let current_size = *self.buffer_size.lock().expect("buffer_size lock poisoned");
 
-        let mut free = self.free_buffers.lock().expect("free_buffers lock poisoned");
+        let mut free = self
+            .free_buffers
+            .lock()
+            .expect("free_buffers lock poisoned");
         if let Some(ptr) = free.pop() {
             BounceBuffer {
                 pool: self,
@@ -139,7 +138,10 @@ impl<A: Allocator> BounceBufferPool<A> {
         let current_size = *self.buffer_size.lock().expect("buffer_size lock poisoned");
 
         if size == current_size {
-            let mut free = self.free_buffers.lock().expect("free_buffers lock poisoned");
+            let mut free = self
+                .free_buffers
+                .lock()
+                .expect("free_buffers lock poisoned");
             free.push(ptr);
         } else {
             // Size mismatch: deallocate instead of returning to pool.
@@ -181,7 +183,10 @@ impl<A: Allocator> BounceBufferPool<A> {
     /// Deallocate all free buffers in the pool.
     pub fn clear(&self) {
         let current_size = *self.buffer_size.lock().expect("buffer_size lock poisoned");
-        let mut free = self.free_buffers.lock().expect("free_buffers lock poisoned");
+        let mut free = self
+            .free_buffers
+            .lock()
+            .expect("free_buffers lock poisoned");
         for ptr in free.drain(..) {
             // SAFETY: these pointers were allocated by our allocator.
             unsafe {

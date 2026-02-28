@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use crate::error::{Error, ErrorKind, Result};
+use cudarc::cufile::Cufile;
+use cudarc::driver::CudaSlice;
 
 /// Register a device buffer for repeated GDS I/O.
 ///
@@ -19,10 +21,7 @@ use crate::error::{Error, ErrorKind, Result};
 ///
 /// * `driver` - The cuFile driver instance (from a `FileHandle`).
 /// * `buf` - The device buffer to register.
-pub fn buffer_register(
-    driver: &Arc<cudarc::cufile::Cufile>,
-    buf: &cudarc::driver::CudaSlice<u8>,
-) -> Result<()> {
+pub fn buffer_register(driver: &Arc<Cufile>, buf: &CudaSlice<u8>) -> Result<()> {
     driver.buf_register(buf).map_err(|e| {
         Error::new(
             ErrorKind::CuFileError,
@@ -42,10 +41,7 @@ pub fn buffer_register(
 ///
 /// * `driver` - The cuFile driver instance.
 /// * `buf` - The device buffer to deregister.
-pub fn buffer_deregister(
-    driver: &Arc<cudarc::cufile::Cufile>,
-    buf: &cudarc::driver::CudaSlice<u8>,
-) -> Result<()> {
+pub fn buffer_deregister(driver: &Arc<Cufile>, buf: &CudaSlice<u8>) -> Result<()> {
     driver.buf_deregister(buf).map_err(|e| {
         Error::new(
             ErrorKind::CuFileError,

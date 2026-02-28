@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cudarc::driver::DevicePtr;
+use cudarc::cufile::{Cufile, FileHandle as CufileHandle};
+use cudarc::driver::{CudaSlice, DevicePtr};
 
 use crate::compat_mode::CompatMode;
 use crate::config::Config;
@@ -44,9 +45,9 @@ pub struct FileHandle {
     /// File descriptor without O_DIRECT.
     fd_direct_off: RawFd,
     /// cuFile handle for GDS (None in compat mode).
-    cufile_handle: Option<cudarc::cufile::FileHandle>,
+    cufile_handle: Option<CufileHandle>,
     /// Reference to the cuFile driver (keeps it alive).
-    driver: Option<Arc<cudarc::cufile::Cufile>>,
+    driver: Option<Arc<Cufile>>,
     /// Cached file size.
     nbytes_cached: AtomicU64,
     /// Effective compatibility mode for this handle.
@@ -74,12 +75,11 @@ impl FileHandle {
             .map_err(|e| e.with_operation("FileHandle::open"))?;
 
         // Try to open with O_DIRECT. This may fail on certain filesystems (tmpfs, etc.)
-        let fd_direct_on =
-            posix_io::posix_open(path, o_flags | libc::O_DIRECT, mode).unwrap_or(-1);
+        let fd_direct_on = posix_io::posix_open(path, o_flags | libc::O_DIRECT, mode).unwrap_or(-1);
 
         // Get initial file size.
-        let nbytes = posix_io::file_size(fd_direct_off)
-            .map_err(|e| e.with_operation("FileHandle::open"))?;
+        let nbytes =
+            posix_io::file_size(fd_direct_off).map_err(|e| e.with_operation("FileHandle::open"))?;
 
         // Determine effective compat mode and initialize cuFile.
         //
@@ -228,7 +228,7 @@ impl FileHandle {
     /// * `dev_offset` - Byte offset into the device buffer.
     pub fn read(
         &self,
-        dev_ptr: &mut cudarc::driver::CudaSlice<u8>,
+        dev_ptr: &mut CudaSlice<u8>,
         size: usize,
         file_offset: u64,
         dev_offset: u64,
@@ -277,7 +277,7 @@ impl FileHandle {
     /// * `dev_offset` - Byte offset into the device buffer.
     pub fn write(
         &self,
-        dev_ptr: &cudarc::driver::CudaSlice<u8>,
+        dev_ptr: &CudaSlice<u8>,
         size: usize,
         file_offset: u64,
         dev_offset: u64,
@@ -344,7 +344,7 @@ impl FileHandle {
     /// POSIX device read: file → host bounce buffer → device memory.
     fn posix_device_read(
         &self,
-        _dev_ptr: &mut cudarc::driver::CudaSlice<u8>,
+        _dev_ptr: &mut CudaSlice<u8>,
         _size: usize,
         _file_offset: u64,
         _dev_offset: u64,
@@ -366,7 +366,7 @@ impl FileHandle {
     /// POSIX device write: device memory → host bounce buffer → file.
     fn posix_device_write(
         &self,
-        _dev_ptr: &cudarc::driver::CudaSlice<u8>,
+        _dev_ptr: &CudaSlice<u8>,
         _size: usize,
         _file_offset: u64,
         _dev_offset: u64,
@@ -430,7 +430,14 @@ impl FileHandle {
                 let use_dio = config.auto_direct_io_read;
 
                 let handle = scope.spawn(move || {
-                    posix_io::posix_host_read(fd_on, fd_off, chunk_buf, chunk_file_offset, PartialIO::No, use_dio)
+                    posix_io::posix_host_read(
+                        fd_on,
+                        fd_off,
+                        chunk_buf,
+                        chunk_file_offset,
+                        PartialIO::No,
+                        use_dio,
+                    )
                 });
 
                 handles.push(handle);
@@ -461,12 +468,7 @@ impl FileHandle {
     /// * `task_size` - Size of each chunk (0 = use config default).
     ///
     /// Returns total bytes written.
-    pub fn pwrite_host(
-        &self,
-        buf: &[u8],
-        file_offset: u64,
-        task_size: usize,
-    ) -> Result<usize> {
+    pub fn pwrite_host(&self, buf: &[u8], file_offset: u64, task_size: usize) -> Result<usize> {
         let ts = if task_size == 0 {
             Config::get().task_size
         } else {
@@ -499,7 +501,14 @@ impl FileHandle {
                 let use_dio = config.auto_direct_io_write;
 
                 let handle = scope.spawn(move || {
-                    posix_io::posix_host_write(fd_on, fd_off, chunk_buf, chunk_file_offset, PartialIO::No, use_dio)
+                    posix_io::posix_host_write(
+                        fd_on,
+                        fd_off,
+                        chunk_buf,
+                        chunk_file_offset,
+                        PartialIO::No,
+                        use_dio,
+                    )
                 });
 
                 handles.push(handle);
@@ -579,12 +588,8 @@ fn parse_flags(flags: &str) -> Result<i32> {
 }
 
 /// Initialize the cuFile driver and register the file.
-fn init_cufile(
-    path: &Path,
-    _flags: i32,
-    _mode: u32,
-) -> Result<(Arc<cudarc::cufile::Cufile>, cudarc::cufile::FileHandle)> {
-    let driver = cudarc::cufile::Cufile::new().map_err(|e| {
+fn init_cufile(path: &Path, _flags: i32, _mode: u32) -> Result<(Arc<Cufile>, CufileHandle)> {
+    let driver = Cufile::new().map_err(|e| {
         Error::new(
             ErrorKind::CuFileError,
             format!("failed to initialize cuFile driver: {e}"),
@@ -598,8 +603,11 @@ fn init_cufile(
         .truncate(false)
         .open(path)
         .map_err(|e| {
-            Error::new(ErrorKind::SystemError, format!("failed to open file for cuFile: {e}"))
-                .set_source(e)
+            Error::new(
+                ErrorKind::SystemError,
+                format!("failed to open file for cuFile: {e}"),
+            )
+            .set_source(e)
         })?;
 
     let handle = driver.register(file).map_err(|e| {

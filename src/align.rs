@@ -26,7 +26,10 @@ pub fn page_size() -> usize {
 /// ```
 #[inline]
 pub fn align_up(value: usize, alignment: usize) -> usize {
-    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     (value + alignment - 1) & !(alignment - 1)
 }
 
@@ -44,7 +47,10 @@ pub fn align_up(value: usize, alignment: usize) -> usize {
 /// ```
 #[inline]
 pub fn align_down(value: usize, alignment: usize) -> usize {
-    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     value & !(alignment - 1)
 }
 
@@ -61,7 +67,10 @@ pub fn align_down(value: usize, alignment: usize) -> usize {
 /// ```
 #[inline]
 pub fn is_aligned(value: usize, alignment: usize) -> bool {
-    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     (value & (alignment - 1)) == 0
 }
 
