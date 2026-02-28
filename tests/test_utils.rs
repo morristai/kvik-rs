@@ -239,6 +239,85 @@ impl UnalignedBuffer {
     }
 }
 
+/// Host memory info from `/proc/self/status` (Linux only).
+///
+/// Tracks `VmRSS` (total resident set) and `RssAnon` (anonymous resident
+/// pages, i.e., heap/stack, excluding file-backed pages).
+pub struct HostMemInfo {
+    /// Total resident set size in kB.
+    pub vm_rss_kb: u64,
+    /// Anonymous (non-file-backed) resident pages in kB.
+    pub rss_anon_kb: u64,
+}
+
+impl HostMemInfo {
+    /// Snapshot current host memory usage from `/proc/self/status`.
+    pub fn now() -> Self {
+        let status = std::fs::read_to_string("/proc/self/status")
+            .expect("failed to read /proc/self/status");
+        let mut vm_rss_kb = 0u64;
+        let mut rss_anon_kb = 0u64;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                vm_rss_kb = parse_kb_field(rest);
+            } else if let Some(rest) = line.strip_prefix("RssAnon:") {
+                rss_anon_kb = parse_kb_field(rest);
+            }
+        }
+        Self {
+            vm_rss_kb,
+            rss_anon_kb,
+        }
+    }
+
+    /// Signed delta in anonymous RSS (kB) relative to a baseline.
+    pub fn anon_delta_kb(&self, before: &HostMemInfo) -> i64 {
+        self.rss_anon_kb as i64 - before.rss_anon_kb as i64
+    }
+}
+
+/// Parse a `/proc/self/status` value field like `"   12345 kB"` into kB.
+fn parse_kb_field(s: &str) -> u64 {
+    s.trim()
+        .strip_suffix("kB")
+        .or_else(|| s.trim().strip_suffix("KB"))
+        .unwrap_or(s.trim())
+        .trim()
+        .parse::<u64>()
+        .expect("failed to parse /proc/self/status memory field")
+}
+
+/// GPU VRAM info from the cudarc driver API.
+pub struct GpuMemInfo {
+    /// Free VRAM in bytes.
+    pub free_bytes: usize,
+    /// Total VRAM in bytes.
+    pub total_bytes: usize,
+}
+
+impl GpuMemInfo {
+    /// Snapshot current GPU VRAM usage. Binds the context to the current thread.
+    pub fn now(ctx: &std::sync::Arc<cudarc::driver::CudaContext>) -> Self {
+        ctx.bind_to_thread().expect("bind failed");
+        let (free, total) =
+            cudarc::driver::result::mem_get_info().expect("mem_get_info failed");
+        Self {
+            free_bytes: free,
+            total_bytes: total,
+        }
+    }
+
+    /// Bytes of VRAM currently in use.
+    pub fn used_bytes(&self) -> usize {
+        self.total_bytes - self.free_bytes
+    }
+
+    /// Signed delta in used VRAM (bytes) relative to a baseline.
+    pub fn used_delta_bytes(&self, before: &GpuMemInfo) -> i64 {
+        self.used_bytes() as i64 - before.used_bytes() as i64
+    }
+}
+
 /// Check if Direct I/O (O_DIRECT) is supported on the filesystem containing
 /// the given path. Returns `true` if O_DIRECT opens succeed.
 pub fn is_direct_io_supported(path: &std::path::Path) -> bool {
