@@ -5,6 +5,13 @@ edition = "2024"
 description = "GPUDirect Storage (GDS) accelerated file I/O for NVIDIA GPUs"
 license = "Apache-2.0"
 authors = ["Morris Tai <morristai@apache.org>"]
+repository = "https://github.com/morristai/kvik-rs"
+readme = "README.md"
+keywords = ["cuda", "nvidia", "gpu", "gds", "io"]
+categories = ["api-bindings", "hardware-support", "filesystem"]
+
+[package.metadata.docs.rs]
+features = ["cuda-13010"]
 
 [dependencies]
 cudarc = { version = "0.19", features = ["cufile", "std"] }
