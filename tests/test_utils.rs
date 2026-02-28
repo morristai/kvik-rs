@@ -253,8 +253,8 @@ pub struct HostMemInfo {
 impl HostMemInfo {
     /// Snapshot current host memory usage from `/proc/self/status`.
     pub fn now() -> Self {
-        let status = std::fs::read_to_string("/proc/self/status")
-            .expect("failed to read /proc/self/status");
+        let status =
+            std::fs::read_to_string("/proc/self/status").expect("failed to read /proc/self/status");
         let mut vm_rss_kb = 0u64;
         let mut rss_anon_kb = 0u64;
         for line in status.lines() {
@@ -299,8 +299,7 @@ impl GpuMemInfo {
     /// Snapshot current GPU VRAM usage. Binds the context to the current thread.
     pub fn now(ctx: &std::sync::Arc<cudarc::driver::CudaContext>) -> Self {
         ctx.bind_to_thread().expect("bind failed");
-        let (free, total) =
-            cudarc::driver::result::mem_get_info().expect("mem_get_info failed");
+        let (free, total) = cudarc::driver::result::mem_get_info().expect("mem_get_info failed");
         Self {
             free_bytes: free,
             total_bytes: total,

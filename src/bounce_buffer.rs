@@ -8,8 +8,8 @@
 //! | Allocator | Backing | Use case |
 //! |-----------|---------|----------|
 //! | [`PageAligned`] | `posix_memalign` | Host-only Direct I/O |
-//! | [`CudaPinned`] | CUDA `cudaMallocHost` | Device I/O without Direct I/O |
-//! | [`CudaPageAlignedPinned`] | `posix_memalign` + `cudaHostRegister` | Device I/O with Direct I/O |
+//! | `CudaPinned` | CUDA `cudaMallocHost` | Device I/O without Direct I/O |
+//! | `CudaPageAlignedPinned` | `posix_memalign` + `cudaHostRegister` | Device I/O with Direct I/O |
 //!
 //! # Pool Design
 //!

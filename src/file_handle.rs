@@ -243,20 +243,18 @@ impl FileHandle {
                             ErrorKind::CuFileError,
                             format!("cuFile read returned negative: {bytes_read}"),
                         )
-                            .with_operation("FileHandle::read")
-                            .with_context("path", self.path.display().to_string()));
+                        .with_operation("FileHandle::read")
+                        .with_context("path", self.path.display().to_string()));
                     }
                     Ok(bytes_read as usize)
                 }
-                Err(e) => {
-                    Err(Error::new(
-                        ErrorKind::CuFileError,
-                        format!("cuFile read failed: {e}"),
-                    )
-                        .with_operation("FileHandle::read")
-                        .with_context("path", self.path.display().to_string()))
-                }
-            }
+                Err(e) => Err(Error::new(
+                    ErrorKind::CuFileError,
+                    format!("cuFile read failed: {e}"),
+                )
+                .with_operation("FileHandle::read")
+                .with_context("path", self.path.display().to_string())),
+            };
         }
 
         // POSIX fallback for device memory: stage through host bounce buffer.
@@ -321,20 +319,18 @@ impl FileHandle {
                             ErrorKind::CuFileError,
                             format!("cuFile write returned negative: {bytes_written}"),
                         )
-                            .with_operation("FileHandle::write")
-                            .with_context("path", self.path.display().to_string()));
+                        .with_operation("FileHandle::write")
+                        .with_context("path", self.path.display().to_string()));
                     }
                     Ok(bytes_written as usize)
                 }
-                Err(e) => {
-                    Err(Error::new(
-                        ErrorKind::CuFileError,
-                        format!("cuFile write failed: {e}"),
-                    )
-                        .with_operation("FileHandle::write")
-                        .with_context("path", self.path.display().to_string()))
-                }
-            }
+                Err(e) => Err(Error::new(
+                    ErrorKind::CuFileError,
+                    format!("cuFile write failed: {e}"),
+                )
+                .with_operation("FileHandle::write")
+                .with_context("path", self.path.display().to_string())),
+            };
         }
 
         // POSIX fallback for device memory.

@@ -362,7 +362,11 @@ fn test_z_oom_scenarios() {
     let (free, _total) = mem_info(&ctx);
     let stream = ctx.default_stream();
 
-    eprintln!("VRAM: {} MiB free, {} MiB total", free / (1024 * 1024), _total / (1024 * 1024));
+    eprintln!(
+        "VRAM: {} MiB free, {} MiB total",
+        free / (1024 * 1024),
+        _total / (1024 * 1024)
+    );
 
     // ------------------------------------------------------------------
     // Scenario 1: GDS I/O with pre-allocated buffer while VRAM is ~95% full
@@ -490,7 +494,9 @@ fn test_z_oom_scenarios() {
         if after_free.is_ok() {
             eprintln!("recovery after incremental OOM: succeeded");
         } else {
-            eprintln!("recovery after incremental OOM: failed (known CUDA async allocator limitation)");
+            eprintln!(
+                "recovery after incremental OOM: failed (known CUDA async allocator limitation)"
+            );
         }
     }
 
@@ -535,7 +541,9 @@ fn test_z_oom_scenarios() {
         if recovered.is_ok() {
             eprintln!("recovery after clone_htod OOM: succeeded");
         } else {
-            eprintln!("recovery after clone_htod OOM: failed (known CUDA async allocator limitation)");
+            eprintln!(
+                "recovery after clone_htod OOM: failed (known CUDA async allocator limitation)"
+            );
         }
     }
 }
