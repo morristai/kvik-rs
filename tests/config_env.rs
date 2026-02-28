@@ -72,10 +72,7 @@ fn test_env_auto_direct_io_write() {
 #[test]
 fn test_conflicting_nthreads_aliases_same_value() {
     // Both set to the same value — should be OK, last one wins.
-    let _guard = EnvVarGuard::new(&[
-        ("KVIKIO_NTHREADS", "4"),
-        ("KVIKIO_NUM_THREADS", "4"),
-    ]);
+    let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "4"), ("KVIKIO_NUM_THREADS", "4")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 4);
 }
@@ -83,10 +80,7 @@ fn test_conflicting_nthreads_aliases_same_value() {
 #[test]
 fn test_conflicting_nthreads_aliases_different_values() {
     // Different values — KVIKIO_NUM_THREADS wins (checked second, overwrites first).
-    let _guard = EnvVarGuard::new(&[
-        ("KVIKIO_NTHREADS", "4"),
-        ("KVIKIO_NUM_THREADS", "8"),
-    ]);
+    let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "4"), ("KVIKIO_NUM_THREADS", "8")]);
     let config = Config::from_env().unwrap();
     // KVIKIO_NUM_THREADS is checked after KVIKIO_NTHREADS, so it takes precedence.
     assert_eq!(config.num_threads, 8);
@@ -126,10 +120,7 @@ fn test_invalid_bool_value() {
 
 #[test]
 fn test_empty_env_values_use_defaults() {
-    let _guard = EnvVarGuard::new(&[
-        ("KVIKIO_NTHREADS", ""),
-        ("KVIKIO_TASK_SIZE", ""),
-    ]);
+    let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", ""), ("KVIKIO_TASK_SIZE", "")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 1);
     assert_eq!(config.task_size, 4 * 1024 * 1024);

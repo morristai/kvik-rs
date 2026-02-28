@@ -8,7 +8,7 @@ mod test_utils;
 use kvik_rs::compat_mode::{is_udev_readable, is_wsl, resolve_compat_mode};
 use kvik_rs::{CompatMode, Config, FileHandle};
 
-use test_utils::{assert_data_eq, gen_data, EnvVarGuard};
+use test_utils::{EnvVarGuard, assert_data_eq, gen_data};
 
 /// Auto-detection should return a valid, non-Auto mode.
 #[test]

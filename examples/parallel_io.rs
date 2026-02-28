@@ -34,7 +34,11 @@ fn main() {
     println!("Configuration:");
     println!("  compat_mode:  {}", config.compat_mode);
     println!("  num_threads:  {}", config.num_threads);
-    println!("  task_size:    {} bytes ({} KB)", config.task_size, config.task_size / 1024);
+    println!(
+        "  task_size:    {} bytes ({} KB)",
+        config.task_size,
+        config.task_size / 1024
+    );
     println!();
 
     // Parameters.
@@ -126,10 +130,7 @@ fn main() {
     // ---- Verify data ----
     println!("\n--- Verification ---");
     for (i, (original, readback)) in data_sets.iter().zip(read_results.iter()).enumerate() {
-        assert_eq!(
-            original, readback,
-            "data mismatch in file {i}"
-        );
+        assert_eq!(original, readback, "data mismatch in file {i}");
         println!("  File {i}: PASSED ({nelem} elements correct)");
     }
 

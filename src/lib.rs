@@ -3,8 +3,7 @@
 //! GPUDirect Storage (GDS) accelerated file I/O for NVIDIA GPUs.
 //!
 //! kvik-rs provides Rust developers with a safe, ergonomic API for GPU-accelerated
-//! file I/O that mirrors the capabilities of the C++ kvikio library. It is designed
-//! both as a standalone library and as an integration target for Apache OpenDAL.
+//! file I/O that mirrors the capabilities of the C++ kvikio library.
 //!
 //! ## Architecture
 //!

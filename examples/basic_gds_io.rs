@@ -59,11 +59,11 @@ fn main() {
 
     // --- Step 2: Allocate device memory ---
     println!("\n--- Device Memory ---");
-    let data: Vec<u8> = (0..nelem)
-        .flat_map(|i| (i as i32).to_ne_bytes())
-        .collect();
+    let data: Vec<u8> = (0..nelem).flat_map(|i| (i as i32).to_ne_bytes()).collect();
 
-    let dev_a = stream.clone_htod(&data).expect("clone_htod failed for dev_a");
+    let dev_a = stream
+        .clone_htod(&data)
+        .expect("clone_htod failed for dev_a");
     let mut dev_b = stream
         .alloc_zeros::<u8>(size)
         .expect("alloc_zeros failed for dev_b");
@@ -76,8 +76,8 @@ fn main() {
     println!("\n--- File Handle ---");
     println!("  Temp file: {}", path.display());
 
-    let handle = FileHandle::open(path, "w+", 0o644, CompatMode::Auto)
-        .expect("failed to open file");
+    let handle =
+        FileHandle::open(path, "w+", 0o644, CompatMode::Auto).expect("failed to open file");
     println!("  compat_mode:   {}", handle.compat_mode());
     println!("  gds_available: {}", handle.is_gds_available());
 
@@ -87,10 +87,7 @@ fn main() {
     match handle.write(&dev_a, size, 0, 0) {
         Ok(written) => {
             let elapsed = start.elapsed();
-            println!(
-                "  Wrote {written} bytes in {:.1} us",
-                elapsed.as_micros()
-            );
+            println!("  Wrote {written} bytes in {:.1} us", elapsed.as_micros());
             assert_eq!(written, size, "short write");
         }
         Err(e) => {
@@ -109,10 +106,7 @@ fn main() {
     match handle.read(&mut dev_b, size, 0, 0) {
         Ok(read) => {
             let elapsed = start.elapsed();
-            println!(
-                "  Read {read} bytes in {:.1} us",
-                elapsed.as_micros()
-            );
+            println!("  Read {read} bytes in {:.1} us", elapsed.as_micros());
             assert_eq!(read, size, "short read");
         }
         Err(e) => {
@@ -128,10 +122,7 @@ fn main() {
         let offset = i * 4;
         let expected = (i as i32).to_ne_bytes();
         let actual = &result[offset..offset + 4];
-        assert_eq!(
-            actual, &expected,
-            "data mismatch at element {i}"
-        );
+        assert_eq!(actual, &expected, "data mismatch at element {i}");
     }
     println!("  Data verification: PASSED ({nelem} elements correct)");
 
@@ -142,9 +133,7 @@ fn main() {
         .collect();
 
     let start = Instant::now();
-    let written = handle
-        .write_host(&host_data, 0)
-        .expect("write_host failed");
+    let written = handle.write_host(&host_data, 0).expect("write_host failed");
     let write_elapsed = start.elapsed();
     println!(
         "  Host write: {written} bytes in {:.1} us",
@@ -172,15 +161,12 @@ fn main() {
 fn run_host_only_demo(nelem: usize, size: usize) {
     println!("--- Host-Only I/O Demo ---");
 
-    let data: Vec<u8> = (0..nelem)
-        .flat_map(|i| (i as i32).to_ne_bytes())
-        .collect();
+    let data: Vec<u8> = (0..nelem).flat_map(|i| (i as i32).to_ne_bytes()).collect();
 
     let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
     let path = tmp.path();
 
-    let handle = FileHandle::open(path, "w+", 0o644, CompatMode::On)
-        .expect("failed to open file");
+    let handle = FileHandle::open(path, "w+", 0o644, CompatMode::On).expect("failed to open file");
 
     let start = Instant::now();
     let written = handle.write_host(&data, 0).expect("write_host failed");

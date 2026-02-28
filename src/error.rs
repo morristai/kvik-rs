@@ -1,8 +1,5 @@
 //! Error types for kvik-rs.
 //!
-//! Follows OpenDAL's error handling design principles: errors are both
-//! **actionable** (via [`ErrorStatus`]) and **informative** (via [`ErrorKind`]).
-//!
 //! # Design
 //!
 //! - [`ErrorKind`] categorizes *what* went wrong.
@@ -106,9 +103,6 @@ impl fmt::Display for ErrorStatus {
 }
 
 /// The main error type for kvik-rs.
-///
-/// Combines an [`ErrorKind`] (what went wrong) with an [`ErrorStatus`]
-/// (what to do about it), plus rich context for debugging.
 pub struct Error {
     kind: ErrorKind,
     message: String,

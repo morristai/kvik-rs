@@ -36,9 +36,7 @@ fn main() {
     println!();
 
     // Generate test data: sequential integers as bytes.
-    let data: Vec<u8> = (0..nelem)
-        .flat_map(|i| (i as i32).to_ne_bytes())
-        .collect();
+    let data: Vec<u8> = (0..nelem).flat_map(|i| (i as i32).to_ne_bytes()).collect();
     assert_eq!(data.len(), size);
 
     // Create a temporary file.
@@ -50,9 +48,7 @@ fn main() {
     let start = Instant::now();
     let handle = FileHandle::open(path, "w", 0o644, CompatMode::On)
         .expect("failed to open file for writing");
-    let written = handle
-        .write_host(&data, 0)
-        .expect("write_host failed");
+    let written = handle.write_host(&data, 0).expect("write_host failed");
     drop(handle);
     let write_elapsed = start.elapsed();
 
@@ -78,20 +74,14 @@ fn main() {
     let read_elapsed = start.elapsed();
 
     assert_eq!(read, size, "short read");
-    println!(
-        "Read:  {read} bytes in {:.1} us",
-        read_elapsed.as_micros()
-    );
+    println!("Read:  {read} bytes in {:.1} us", read_elapsed.as_micros());
 
     // ---- Verify data ----
     for i in 0..nelem {
         let offset = i * 4;
         let expected = (i as i32).to_ne_bytes();
         let actual = &read_buf[offset..offset + 4];
-        assert_eq!(
-            actual, &expected,
-            "data mismatch at element {i}"
-        );
+        assert_eq!(actual, &expected, "data mismatch at element {i}");
     }
     println!("\nData verification: PASSED ({nelem} elements correct)");
 

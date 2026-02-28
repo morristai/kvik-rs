@@ -11,7 +11,9 @@ use std::os::fd::RawFd;
 use kvik_rs::align::{is_aligned_ptr, page_size};
 use kvik_rs::{CompatMode, Config, FileHandle};
 
-use test_utils::{assert_data_eq, gen_data, is_direct_io_supported, AlignedBuffer, UnalignedBuffer};
+use test_utils::{
+    AlignedBuffer, UnalignedBuffer, assert_data_eq, gen_data, is_direct_io_supported,
+};
 
 /// Helper: open a file without O_DIRECT.
 fn open_buffered(path: &std::path::Path, flags: i32) -> RawFd {
@@ -285,9 +287,7 @@ fn test_cross_verify_raw_write_kvik_read() {
     let fd = open_buffered(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC);
     let mut total = 0;
     while total < size {
-        let n = unsafe {
-            raw_pwrite(fd, data.as_ptr().add(total), size - total, total as i64)
-        };
+        let n = unsafe { raw_pwrite(fd, data.as_ptr().add(total), size - total, total as i64) };
         assert!(n > 0, "raw_pwrite returned {n}");
         total += n as usize;
     }

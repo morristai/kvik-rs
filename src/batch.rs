@@ -19,9 +19,9 @@ use cudarc::cufile::result::{
     batch_io_cancel, batch_io_destroy, batch_io_get_status, batch_io_setup, batch_io_submit,
 };
 use cudarc::cufile::sys::{
-    timespec, CUfileBatchHandle_t, CUfileBatchMode_t,
-    CUfileIOEvents_t, CUfileIOParams__bindgen_ty_1__bindgen_ty_1, CUfileIOParams_t, CUfileOpcode,
-    CUfileStatus_t,
+    CUfileBatchHandle_t, CUfileBatchMode_t, CUfileIOEvents_t,
+    CUfileIOParams__bindgen_ty_1__bindgen_ty_1, CUfileIOParams_t, CUfileOpcode, CUfileStatus_t,
+    timespec,
 };
 
 use crate::error::{Error, ErrorKind, Result};

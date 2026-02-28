@@ -30,3 +30,15 @@ cuda-12080 = ["cudarc/cuda-12080"]
 cuda-12090 = ["cudarc/cuda-12090"]
 cuda-13000 = ["cudarc/cuda-13000"]
 cuda-13010 = ["cudarc/cuda-13010"]
+
+[[example]]
+name = "bench_host_io"
+path = "benchmarks/host_io.rs"
+
+[[example]]
+name = "bench_device_io"
+path = "benchmarks/device_io.rs"
+
+[[example]]
+name = "bench_parallel_io"
+path = "benchmarks/parallel_io.rs"

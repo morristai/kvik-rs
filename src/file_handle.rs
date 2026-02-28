@@ -6,8 +6,8 @@
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::cufile::{Cufile, FileHandle as CufileHandle};
 use cudarc::driver::{CudaSlice, DevicePtr};
@@ -236,25 +236,25 @@ impl FileHandle {
         if let Some(ref cufile_handle) = self.cufile_handle {
             // GDS path: use cuFile for direct GPU-file transfer.
             let ret = cufile_handle.sync_read::<u8, _>(file_offset as i64, dev_ptr);
-            match ret {
+            return match ret {
                 Ok(bytes_read) => {
                     if bytes_read < 0 {
                         return Err(Error::new(
                             ErrorKind::CuFileError,
                             format!("cuFile read returned negative: {bytes_read}"),
                         )
-                        .with_operation("FileHandle::read")
-                        .with_context("path", self.path.display().to_string()));
+                            .with_operation("FileHandle::read")
+                            .with_context("path", self.path.display().to_string()));
                     }
-                    return Ok(bytes_read as usize);
+                    Ok(bytes_read as usize)
                 }
                 Err(e) => {
-                    return Err(Error::new(
+                    Err(Error::new(
                         ErrorKind::CuFileError,
                         format!("cuFile read failed: {e}"),
                     )
-                    .with_operation("FileHandle::read")
-                    .with_context("path", self.path.display().to_string()));
+                        .with_operation("FileHandle::read")
+                        .with_context("path", self.path.display().to_string()))
                 }
             }
         }
@@ -314,25 +314,25 @@ impl FileHandle {
                 )
             };
 
-            match ret {
+            return match ret {
                 Ok(bytes_written) => {
                     if bytes_written < 0 {
                         return Err(Error::new(
                             ErrorKind::CuFileError,
                             format!("cuFile write returned negative: {bytes_written}"),
                         )
-                        .with_operation("FileHandle::write")
-                        .with_context("path", self.path.display().to_string()));
+                            .with_operation("FileHandle::write")
+                            .with_context("path", self.path.display().to_string()));
                     }
-                    return Ok(bytes_written as usize);
+                    Ok(bytes_written as usize)
                 }
                 Err(e) => {
-                    return Err(Error::new(
+                    Err(Error::new(
                         ErrorKind::CuFileError,
                         format!("cuFile write failed: {e}"),
                     )
-                    .with_operation("FileHandle::write")
-                    .with_context("path", self.path.display().to_string()));
+                        .with_operation("FileHandle::write")
+                        .with_context("path", self.path.display().to_string()))
                 }
             }
         }
@@ -635,16 +635,16 @@ mod tests {
     #[test]
     fn test_parse_flags_write() {
         let flags = parse_flags("w").unwrap();
-        assert!(flags & libc::O_WRONLY != 0);
-        assert!(flags & libc::O_CREAT != 0);
-        assert!(flags & libc::O_TRUNC != 0);
+        assert_ne!(flags & libc::O_WRONLY, 0);
+        assert_ne!(flags & libc::O_CREAT, 0);
+        assert_ne!(flags & libc::O_TRUNC, 0);
     }
 
     #[test]
     fn test_parse_flags_append() {
         let flags = parse_flags("a").unwrap();
-        assert!(flags & libc::O_WRONLY != 0);
-        assert!(flags & libc::O_APPEND != 0);
+        assert_ne!(flags & libc::O_WRONLY, 0);
+        assert_ne!(flags & libc::O_APPEND, 0);
     }
 
     #[test]
@@ -656,8 +656,8 @@ mod tests {
     #[test]
     fn test_parse_flags_write_readwrite() {
         let flags = parse_flags("w+").unwrap();
-        assert!(flags & libc::O_RDWR != 0);
-        assert!(flags & libc::O_CREAT != 0);
+        assert_ne!(flags & libc::O_RDWR, 0);
+        assert_ne!(flags & libc::O_CREAT, 0);
     }
 
     #[test]
