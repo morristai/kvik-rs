@@ -1,0 +1,32 @@
+[package]
+name = "kvik-rs"
+version = "0.1.0"
+edition = "2024"
+description = "GPUDirect Storage (GDS) accelerated file I/O for NVIDIA GPUs"
+license = "Apache-2.0"
+authors = ["Morris Tai <morristai@apache.org>"]
+
+[dependencies]
+cudarc = { version = "0.19", features = ["cufile", "std"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["cuda-version-from-build-system"]
+cuda-version-from-build-system = ["cudarc/cuda-version-from-build-system"]
+cuda-11060 = ["cudarc/cuda-11060"]
+cuda-11070 = ["cudarc/cuda-11070"]
+cuda-11080 = ["cudarc/cuda-11080"]
+cuda-12000 = ["cudarc/cuda-12000"]
+cuda-12010 = ["cudarc/cuda-12010"]
+cuda-12020 = ["cudarc/cuda-12020"]
+cuda-12030 = ["cudarc/cuda-12030"]
+cuda-12040 = ["cudarc/cuda-12040"]
+cuda-12050 = ["cudarc/cuda-12050"]
+cuda-12060 = ["cudarc/cuda-12060"]
+cuda-12080 = ["cudarc/cuda-12080"]
+cuda-12090 = ["cudarc/cuda-12090"]
+cuda-13000 = ["cudarc/cuda-13000"]
+cuda-13010 = ["cudarc/cuda-13010"]
