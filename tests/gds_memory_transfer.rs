@@ -117,7 +117,14 @@ fn test_gds_write_uses_vram_not_host_ram() {
     );
 
     // --- Step 6: Open temp file, check GDS availability ---
-    let tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
+    // GDS requires a real block-device-backed filesystem (ext4/xfs on NVMe).
+    // tmpfs (the default for NamedTempFile) does not support DMA, causing
+    // cuFile to silently fall back to compat mode (host bounce buffer).
+    // Use KVIK_GDS_TEST_DIR (e.g. /mnt/nvme) to point at an NVMe-backed mount.
+    let tmp_dir = std::env::var("KVIK_GDS_TEST_DIR")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    let tmp = tempfile::NamedTempFile::new_in(&tmp_dir)
+        .unwrap_or_else(|e| panic!("failed to create temp file in {tmp_dir}: {e}"));
     let handle = FileHandle::open(tmp.path(), "w+", 0o644, CompatMode::Auto)
         .expect("failed to open temp file");
 
