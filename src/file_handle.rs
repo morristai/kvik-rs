@@ -584,7 +584,11 @@ fn parse_flags(flags: &str) -> Result<i32> {
 }
 
 /// Initialize the cuFile driver and register the file.
-fn init_cufile(path: &Path, _flags: i32, _mode: u32) -> Result<(Arc<Cufile>, CufileHandle)> {
+///
+/// Opens the file with `O_DIRECT` so the cuFile driver can use true GDS DMA
+/// (GPU↔storage without staging through host RAM). Without `O_DIRECT`, cuFile
+/// silently falls back to compat mode using a host bounce buffer.
+fn init_cufile(path: &Path, flags: i32, _mode: u32) -> Result<(Arc<Cufile>, CufileHandle)> {
     let driver = Cufile::new().map_err(|e| {
         Error::new(
             ErrorKind::CuFileError,
@@ -592,11 +596,16 @@ fn init_cufile(path: &Path, _flags: i32, _mode: u32) -> Result<(Arc<Cufile>, Cuf
         )
     })?;
 
+    use std::os::unix::fs::OpenOptionsExt;
+    // Derive read/write from the caller's O_* flags, and always add O_DIRECT.
+    let readable = flags & libc::O_WRONLY == 0; // O_RDONLY or O_RDWR
+    let writable = flags & (libc::O_WRONLY | libc::O_RDWR) != 0;
     let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
+        .read(readable)
+        .write(writable)
+        .create(writable)
         .truncate(false)
+        .custom_flags(libc::O_DIRECT)
         .open(path)
         .map_err(|e| {
             Error::new(
