@@ -182,13 +182,34 @@ impl FileHandle {
         self.cufile_handle.is_some()
     }
 
+    /// Returns the raw cuFile handle for batch I/O operations.
+    ///
+    /// Returns `None` if the handle is in compatibility mode (no GDS).
+    /// The returned handle is only valid while this `FileHandle` is alive.
+    pub fn cufile_handle_raw(&self) -> Option<cudarc::cufile::sys::CUfileHandle_t> {
+        self.cufile_handle.as_ref().map(|h| h.cu())
+    }
+
+    /// Returns `true` if this handle has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.fd_direct_off == -1
+    }
+
     /// Close the file handle explicitly.
     ///
-    /// This is also done automatically on drop, but calling `close` allows
-    /// error handling.
+    /// Also called automatically on [`Drop`]. Calling close on an
+    /// already-closed handle is a safe no-op (file descriptors are set to -1
+    /// after closing, and `posix_close(-1)` is a no-op). Subsequent I/O
+    /// operations on a closed handle will fail with `EBADF`.
+    ///
+    /// The cuFile handle and driver reference are dropped first (deregistering
+    /// the file from GDS) before the POSIX file descriptors are closed, which
+    /// matches the required teardown order from the GDS Design Guide.
     pub fn close(&mut self) {
+        // Drop cuFile handle first (deregisters from GDS driver).
         self.cufile_handle.take();
         self.driver.take();
+        // Then close the POSIX fds.
         posix_io::posix_close(self.fd_direct_off);
         posix_io::posix_close(self.fd_direct_on);
         self.fd_direct_off = -1;
@@ -620,15 +641,21 @@ impl Drop for FileHandle {
     }
 }
 
-// FileHandle is Send because file descriptors are just integers,
-// cuFile handles are thread-safe, and we use atomic operations for nbytes.
-// SAFETY: All internal state is either atomic, Arc-wrapped, or plain integers.
+// SAFETY: FileHandle can be moved between threads. Non-Send fields:
+// - fd_direct_on/fd_direct_off: RawFd (i32), trivially Send
+// - cufile_handle: Option<CufileHandle> — cudarc's CufileHandle contains an
+//   Arc<Cufile> and a CUfileHandle_t (*mut c_void). The cuFile C API is
+//   thread-safe per the GDS documentation, and the Arc ensures shared ownership.
+// - driver: Option<Arc<Cufile>> — Arc is Send+Sync when the inner type is
+// - path: PathBuf is Send
+// - nbytes_cached: AtomicU64 is Send
+// - compat_mode: Copy enum, Send
 unsafe impl Send for FileHandle {}
-// SAFETY: FileHandle is safe to share across threads because:
-// - fd_direct_on/fd_direct_off are RawFd (just integers, pread/pwrite are thread-safe)
-// - cufile_handle/driver are wrapped in Option/Arc (thread-safe)
-// - nbytes_cached uses AtomicU64
-// - path is immutable after construction
+// SAFETY: FileHandle can be shared across threads via &FileHandle because:
+// - pread/pwrite are thread-safe POSIX calls (operate on independent offsets)
+// - cuFileRead/cuFileWrite are documented as thread-safe in the GDS API
+// - nbytes_cached uses AtomicU64 for lock-free concurrent reads
+// - All other fields are immutable after construction
 unsafe impl Sync for FileHandle {}
 
 impl std::fmt::Debug for FileHandle {
