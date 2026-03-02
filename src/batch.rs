@@ -52,8 +52,10 @@ pub struct BatchOp<'a> {
     pub opcode: BatchOpcode,
 }
 
-// SAFETY: BatchOp contains a raw pointer, but it is only used as a parameter
-// to cuFile batch operations which require valid device pointers.
+// SAFETY: BatchOp contains a raw `*mut u8` device pointer. The pointer itself
+// is not dereferenced by Rust — it is passed directly to the cuFile batch API
+// which handles the GPU memory access internally. The lifetime-bound borrow of
+// FileHandle ensures the file handle outlives the BatchOp.
 unsafe impl Send for BatchOp<'_> {}
 unsafe impl Sync for BatchOp<'_> {}
 
@@ -117,9 +119,15 @@ impl BatchHandle {
 
     /// Submit a batch of I/O operations.
     ///
+    /// Each [`BatchOp`] must reference a [`FileHandle`] that has a valid
+    /// cuFile handle (i.e., `is_gds_available()` returns `true`). Batch I/O
+    /// is a GDS-only feature and cannot fall back to POSIX.
+    ///
     /// # Errors
     ///
-    /// Returns an error if `ops.len()` exceeds `max_num_events`.
+    /// Returns an error if:
+    /// - `ops.len()` exceeds `max_num_events`
+    /// - Any `BatchOp::file_handle` lacks a cuFile handle (compat mode)
     pub fn submit(&self, ops: &[BatchOp<'_>]) -> Result<()> {
         if ops.len() as u32 > self.max_num_events {
             return Err(Error::new(
@@ -135,15 +143,30 @@ impl BatchHandle {
 
         let params: Vec<CUfileIOParams_t> = ops
             .iter()
-            .map(|op| {
+            .enumerate()
+            .map(|(i, op)| {
                 let opcode = match op.opcode {
                     BatchOpcode::Read => CUfileOpcode::CUFILE_READ,
                     BatchOpcode::Write => CUfileOpcode::CUFILE_WRITE,
                 };
 
-                // SAFETY: We construct the params struct field-by-field using MaybeUninit
-                // to avoid UB from zeroing a non-nullable enum field.
-                // The file handle's cuFile handle must be valid (ensured by the borrow of FileHandle).
+                // Retrieve the raw cuFile handle. Batch I/O requires GDS;
+                // there is no POSIX fallback for batch operations.
+                let fh = op.file_handle.cufile_handle_raw().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unsupported,
+                        format!(
+                            "batch op[{i}]: file handle has no cuFile handle \
+                             (batch I/O requires GDS, not available in compat mode)"
+                        ),
+                    )
+                    .with_operation("BatchHandle::submit")
+                })?;
+
+                // SAFETY: We construct the params struct field-by-field using
+                // MaybeUninit to avoid UB from zeroing a non-nullable enum field.
+                // The file handle's cuFile handle is valid (ensured by the
+                // borrow of FileHandle and the check above).
                 let mut param = std::mem::MaybeUninit::<CUfileIOParams_t>::uninit();
                 let p = param.as_mut_ptr();
                 // SAFETY: p points to valid, allocated (but uninitialized) memory.
@@ -151,10 +174,7 @@ impl BatchHandle {
                 unsafe {
                     (*p).mode = CUfileBatchMode_t::CUFILE_BATCH;
                     (*p).opcode = opcode;
-                    // fh would need to be set from the FileHandle's cuFile handle.
-                    // This requires access to the internal cuFile handle type.
-                    // TODO: This needs cudarc to expose the CUfileHandle_t from FileHandle.
-                    (*p).fh = std::mem::zeroed();
+                    (*p).fh = fh;
                     (*p).cookie = std::ptr::null_mut();
                     (*p).u.batch = CUfileIOParams__bindgen_ty_1__bindgen_ty_1 {
                         devPtr_base: op.dev_ptr as *mut std::ffi::c_void,
@@ -164,13 +184,14 @@ impl BatchHandle {
                     };
                 }
                 // SAFETY: All fields have been initialized above.
-                unsafe { param.assume_init() }
+                Ok(unsafe { param.assume_init() })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // SAFETY: We have validated that ops.len() <= max_num_events.
-        // The params vector contains valid CUfileIOParams_t structs.
-        // The device pointers in BatchOp must be valid (caller's responsibility).
+        // The params vector contains valid CUfileIOParams_t structs with
+        // real cuFile handles. Device pointers must be valid (caller's
+        // responsibility).
         unsafe {
             batch_io_submit(self.handle, &params, 0).map_err(|e| {
                 Error::new(
@@ -271,7 +292,10 @@ impl Drop for BatchHandle {
     }
 }
 
-// SAFETY: cuFile batch handles are thread-safe.
+// SAFETY: cuFile batch handles (CUfileBatchHandle_t) are thread-safe per the
+// cuFile API documentation — cuFileBatchIOGetStatus and cuFileBatchIOCancel
+// can be called from any thread. The handle is an opaque pointer into
+// driver-managed state protected by internal locks.
 unsafe impl Send for BatchHandle {}
 unsafe impl Sync for BatchHandle {}
 

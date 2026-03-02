@@ -68,7 +68,8 @@ unsafe impl Allocator for PageAligned {
     }
 }
 
-// SAFETY: PageAligned contains no state and its methods use thread-safe system calls.
+// SAFETY: PageAligned is a zero-sized unit struct with no interior state.
+// posix_memalign and free are thread-safe per POSIX.
 unsafe impl Send for PageAligned {}
 unsafe impl Sync for PageAligned {}
 
