@@ -5,11 +5,18 @@
 //! a power of two).
 
 /// Returns the page size of the system (typically 4096).
+///
+/// The result is cached after the first call since the page size never changes
+/// during a process's lifetime. This avoids repeated `sysconf` calls in hot
+/// I/O paths (e.g., `posix_host_io`, bounce buffer allocation).
 pub fn page_size() -> usize {
-    // SAFETY: _SC_PAGESIZE is always valid on Linux.
-    let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    debug_assert!(ps > 0, "sysconf(_SC_PAGESIZE) returned {ps}");
-    ps as usize
+    static PAGE_SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAGE_SIZE.get_or_init(|| {
+        // SAFETY: _SC_PAGESIZE is always valid on Linux.
+        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(ps > 0, "sysconf(_SC_PAGESIZE) returned {ps}");
+        ps as usize
+    })
 }
 
 /// Round `value` up to the next multiple of `alignment`.

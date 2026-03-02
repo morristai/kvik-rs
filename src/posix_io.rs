@@ -19,6 +19,7 @@
 use std::os::fd::RawFd;
 
 use crate::align::{align_down, align_up, is_aligned, is_aligned_ptr, page_size};
+use crate::bounce_buffer::{BounceBufferPool, PageAligned};
 use crate::error::{Error, ErrorKind, Result};
 
 /// Whether to loop until all bytes are transferred or return after the first I/O.
@@ -213,9 +214,13 @@ fn posix_host_io(
                     )?
                 }
             } else {
-                // Buffer not aligned: use a page-aligned bounce buffer.
-                let chunk_size = std::cmp::min(dio_size, bounce_buffer_size());
-                let mut bounce = alloc_page_aligned(chunk_size);
+                // Buffer not aligned: use a page-aligned bounce buffer from the
+                // global pool. Reusing pooled buffers avoids repeated
+                // posix_memalign / free calls on every unaligned I/O (the old
+                // code allocated a fresh Vec per call via alloc_page_aligned).
+                let pool = host_bounce_pool();
+                let mut bounce = pool.get();
+                let chunk_size = std::cmp::min(dio_size, bounce.size());
                 let mut seg_transferred = 0;
 
                 while seg_transferred < dio_size {
@@ -330,24 +335,18 @@ unsafe fn do_io(op: IoOp, fd: RawFd, buf: *mut u8, count: usize, offset: i64) ->
     }
 }
 
-/// Get the bounce buffer size from config.
-fn bounce_buffer_size() -> usize {
-    crate::config::Config::get().bounce_buffer_size
-}
-
-/// Allocate a page-aligned buffer of the given size.
-fn alloc_page_aligned(size: usize) -> Vec<u8> {
-    let ps = page_size();
-    let aligned_size = align_up(size, ps);
-    let layout = std::alloc::Layout::from_size_align(aligned_size, ps)
-        .expect("invalid layout for page-aligned allocation");
-    // SAFETY: layout has non-zero size.
-    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-    if ptr.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
-    // SAFETY: ptr is valid for aligned_size bytes and was allocated with the global allocator.
-    unsafe { Vec::from_raw_parts(ptr, aligned_size, aligned_size) }
+/// Global page-aligned bounce buffer pool for host Direct I/O.
+///
+/// Mirrors C++ kvikio's `PageAlignedBounceBufferPool` singleton. The pool is
+/// lazily initialized with the configured bounce buffer size and reuses buffers
+/// across calls to avoid repeated `posix_memalign` / `free` overhead.
+fn host_bounce_pool() -> &'static BounceBufferPool<PageAligned> {
+    use std::sync::OnceLock;
+    static POOL: OnceLock<BounceBufferPool<PageAligned>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let size = crate::config::Config::get().bounce_buffer_size;
+        BounceBufferPool::new(PageAligned, size)
+    })
 }
 
 /// Open a file with POSIX `open(2)`.
@@ -640,23 +639,28 @@ mod tests {
         posix_close(fd);
     }
 
-    // ---- alloc_page_aligned tests ----
+    // ---- host_bounce_pool tests ----
 
     #[test]
-    fn test_alloc_page_aligned() {
+    fn test_host_bounce_pool_returns_aligned_buffer() {
         let ps = page_size();
-        let buf = alloc_page_aligned(ps);
+        let pool = host_bounce_pool();
+        let buf = pool.get();
         assert!(is_aligned_ptr(buf.as_ptr(), ps));
-        assert_eq!(buf.len(), ps);
+        assert!(buf.size() > 0);
     }
 
     #[test]
-    fn test_alloc_page_aligned_not_exact_page_size() {
-        let ps = page_size();
-        let buf = alloc_page_aligned(100);
-        assert!(is_aligned_ptr(buf.as_ptr(), ps));
-        // Should be rounded up to page size.
-        assert_eq!(buf.len(), ps);
+    fn test_host_bounce_pool_reuses_buffers() {
+        let pool = host_bounce_pool();
+        let ptr1;
+        {
+            let buf = pool.get();
+            ptr1 = buf.as_ptr();
+        }
+        // LIFO reuse: same pointer should be returned.
+        let buf = pool.get();
+        assert_eq!(buf.as_ptr(), ptr1);
     }
 
     // ---- PartialIO tests ----
