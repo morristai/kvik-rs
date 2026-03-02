@@ -10,12 +10,40 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::cufile::{Cufile, FileHandle as CufileHandle};
-use cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 
 use crate::compat_mode::CompatMode;
 use crate::config::Config;
 use crate::error::{Error, ErrorKind, Result};
 use crate::posix_io::{self, PartialIO};
+
+/// A `*mut u8` wrapper that implements [`Send`] for use in scoped threads.
+///
+/// # Safety
+///
+/// The caller must guarantee that each thread accesses a disjoint region of
+/// the underlying allocation and that the allocation outlives all threads.
+/// This is enforced structurally by [`pread_host`](FileHandle::pread_host):
+/// chunks are non-overlapping and `std::thread::scope` joins before return.
+#[derive(Clone, Copy)]
+struct SendPtr(*mut u8);
+
+impl SendPtr {
+    /// Return a mutable slice of `len` bytes starting at `offset` from the base.
+    ///
+    /// # Safety
+    ///
+    /// `offset + len` must not exceed the original allocation, and the
+    /// resulting slice must not overlap with any other live reference.
+    unsafe fn slice_mut(self, offset: usize, len: usize) -> &'static mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.0.add(offset), len) }
+    }
+}
+
+// SAFETY: The pointer is only used within scoped threads that each access
+// non-overlapping sub-slices. The scope ensures the allocation is live.
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
 
 /// The primary user-facing type for GPU-accelerated file I/O.
 ///
@@ -235,7 +263,33 @@ impl FileHandle {
     ) -> Result<usize> {
         if let Some(ref cufile_handle) = self.cufile_handle {
             // GDS path: use cuFile for direct GPU-file transfer.
-            let ret = cufile_handle.sync_read::<u8, _>(file_offset as i64, dev_ptr);
+            //
+            // We call result::read directly instead of the safe sync_read
+            // because sync_read hardcodes buf_ptr_offset=0 and uses the full
+            // allocation size, ignoring our `size` and `dev_offset` parameters.
+            let stream = dev_ptr.stream().clone();
+            let (dst, _record_dst) = dev_ptr.device_ptr_mut(&stream);
+            stream.synchronize().map_err(|e| {
+                Error::new(
+                    ErrorKind::CuFileError,
+                    format!("CUDA stream synchronize failed before read: {e}"),
+                )
+                .with_operation("FileHandle::read")
+            })?;
+
+            // SAFETY: cufile_handle.cu() is a valid CUfileHandle_t,
+            // dst is a valid device pointer from the synchronized CudaSlice,
+            // size <= allocation size - dev_offset (caller's responsibility).
+            let ret = unsafe {
+                cudarc::cufile::result::read(
+                    cufile_handle.cu(),
+                    dst as *mut std::ffi::c_void,
+                    size,
+                    file_offset as i64,
+                    dev_offset as i64,
+                )
+            };
+
             return match ret {
                 Ok(bytes_read) => {
                     if bytes_read < 0 {
@@ -284,12 +338,10 @@ impl FileHandle {
             // GDS path: use cuFile for direct GPU-file transfer.
             // cudarc's safe `sync_write` requires `&mut self` on FileHandle, but
             // the underlying cuFileWrite C API is thread-safe and only needs the
-            // handle value. We call `result::write` directly to avoid the overly
-            // conservative borrow requirement.
-            // See: CLAUDE.md §1.4 - "Only drop to cudarc::cufile::result (unsafe
-            // Result wrappers) when the safe API lacks needed functionality."
+            // handle value. It also hardcodes buf_ptr_offset=0 and uses the full
+            // allocation size, so we call `result::write` directly to properly
+            // pass the caller's `size` and `dev_offset`.
             let stream = dev_ptr.stream().clone();
-            let num_bytes = dev_ptr.num_bytes();
             let (src, _record_src) = dev_ptr.device_ptr(&stream);
             stream.synchronize().map_err(|e| {
                 Error::new(
@@ -301,12 +353,12 @@ impl FileHandle {
 
             // SAFETY: cufile_handle.cu() returns a valid CUfileHandle_t,
             // src is a valid device pointer from the synchronized CudaSlice,
-            // and num_bytes matches the allocation size.
+            // and size <= allocation size - dev_offset (caller's responsibility).
             let ret = unsafe {
                 cudarc::cufile::result::write(
                     cufile_handle.cu(),
                     src as *mut std::ffi::c_void,
-                    num_bytes,
+                    size,
                     file_offset as i64,
                     dev_offset as i64,
                 )
@@ -376,6 +428,11 @@ impl FileHandle {
 
     /// Parallel read: splits into chunks across scoped threads.
     ///
+    /// Spawns at most `Config::num_threads` scoped threads and distributes
+    /// chunks across them. Each thread processes its assigned chunks
+    /// sequentially. This mirrors C++ kvikio's thread-pool-based parallel I/O
+    /// while respecting the configured thread limit.
+    ///
     /// # Arguments
     ///
     /// * `buf` - Destination buffer in host memory.
@@ -400,40 +457,50 @@ impl FileHandle {
             return self.read_host(buf, file_offset);
         }
 
-        // Split into chunks and read in parallel using scoped threads.
         let num_chunks = total_size.div_ceil(ts);
         let config = Config::get();
-        let _num_threads = config.num_threads.max(1);
+        let num_threads = config.num_threads.max(1).min(num_chunks);
 
         // SAFETY: We split the buffer into non-overlapping chunks, and each scoped
         // thread gets exclusive access to its chunk. The scoped thread API ensures all
         // threads complete before this function returns, so the buffer remains valid.
-        let buf_base = buf.as_mut_ptr();
+        let buf_base = SendPtr(buf.as_mut_ptr());
 
         let results: Vec<Result<usize>> = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(num_chunks);
+            let mut handles = Vec::with_capacity(num_threads);
 
-            for i in 0..num_chunks {
-                let chunk_offset = i * ts;
-                let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
-                let chunk_file_offset = file_offset + chunk_offset as u64;
-                // SAFETY: chunk_offset + chunk_size <= total_size, and each chunk is non-overlapping.
-                let chunk_buf = unsafe {
-                    std::slice::from_raw_parts_mut(buf_base.add(chunk_offset), chunk_size)
-                };
+            // Distribute chunks round-robin across threads. Each thread
+            // processes its assigned chunk indices sequentially to limit
+            // the total number of OS threads spawned.
+            for thread_id in 0..num_threads {
                 let fd_on = self.fd_direct_on;
                 let fd_off = self.fd_direct_off;
                 let use_dio = config.auto_direct_io_read;
 
                 let handle = scope.spawn(move || {
-                    posix_io::posix_host_read(
-                        fd_on,
-                        fd_off,
-                        chunk_buf,
-                        chunk_file_offset,
-                        PartialIO::No,
-                        use_dio,
-                    )
+                    let mut thread_total = 0usize;
+                    let mut chunk_idx = thread_id;
+                    while chunk_idx < num_chunks {
+                        let chunk_offset = chunk_idx * ts;
+                        let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
+                        let chunk_file_offset = file_offset + chunk_offset as u64;
+                        // SAFETY: chunk_offset + chunk_size <= total_size, and each
+                        // chunk index is assigned to exactly one thread.
+                        let chunk_buf = unsafe {
+                            buf_base.slice_mut(chunk_offset, chunk_size)
+                        };
+                        let n = posix_io::posix_host_read(
+                            fd_on,
+                            fd_off,
+                            chunk_buf,
+                            chunk_file_offset,
+                            PartialIO::No,
+                            use_dio,
+                        )?;
+                        thread_total += n;
+                        chunk_idx += num_threads;
+                    }
+                    Ok(thread_total)
                 });
 
                 handles.push(handle);
@@ -456,6 +523,9 @@ impl FileHandle {
     }
 
     /// Parallel write: splits into chunks across scoped threads.
+    ///
+    /// Spawns at most `Config::num_threads` scoped threads and distributes
+    /// chunks across them. See [`pread_host`](Self::pread_host) for details.
     ///
     /// # Arguments
     ///
@@ -482,29 +552,36 @@ impl FileHandle {
 
         let num_chunks = total_size.div_ceil(ts);
         let config = Config::get();
-        let _num_threads = config.num_threads.max(1);
+        let num_threads = config.num_threads.max(1).min(num_chunks);
 
         let results: Vec<Result<usize>> = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(num_chunks);
+            let mut handles = Vec::with_capacity(num_threads);
 
-            for i in 0..num_chunks {
-                let chunk_offset = i * ts;
-                let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
-                let chunk_file_offset = file_offset + chunk_offset as u64;
-                let chunk_buf = &buf[chunk_offset..chunk_offset + chunk_size];
+            for thread_id in 0..num_threads {
                 let fd_on = self.fd_direct_on;
                 let fd_off = self.fd_direct_off;
                 let use_dio = config.auto_direct_io_write;
 
                 let handle = scope.spawn(move || {
-                    posix_io::posix_host_write(
-                        fd_on,
-                        fd_off,
-                        chunk_buf,
-                        chunk_file_offset,
-                        PartialIO::No,
-                        use_dio,
-                    )
+                    let mut thread_total = 0usize;
+                    let mut chunk_idx = thread_id;
+                    while chunk_idx < num_chunks {
+                        let chunk_offset = chunk_idx * ts;
+                        let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
+                        let chunk_file_offset = file_offset + chunk_offset as u64;
+                        let chunk_buf = &buf[chunk_offset..chunk_offset + chunk_size];
+                        let n = posix_io::posix_host_write(
+                            fd_on,
+                            fd_off,
+                            chunk_buf,
+                            chunk_file_offset,
+                            PartialIO::No,
+                            use_dio,
+                        )?;
+                        thread_total += n;
+                        chunk_idx += num_threads;
+                    }
+                    Ok(thread_total)
                 });
 
                 handles.push(handle);
@@ -588,7 +665,11 @@ fn parse_flags(flags: &str) -> Result<i32> {
 /// Opens the file with `O_DIRECT` so the cuFile driver can use true GDS DMA
 /// (GPU↔storage without staging through host RAM). Without `O_DIRECT`, cuFile
 /// silently falls back to compat mode using a host bounce buffer.
-fn init_cufile(path: &Path, flags: i32, _mode: u32) -> Result<(Arc<Cufile>, CufileHandle)> {
+///
+/// Per the GDS Design Guide, `O_DIRECT` is required for the direct data path
+/// between GPU memory and storage. The cuFile API requires file handles to be
+/// registered via `cuFileHandleRegister`.
+fn init_cufile(path: &Path, flags: i32, mode: u32) -> Result<(Arc<Cufile>, CufileHandle)> {
     let driver = Cufile::new().map_err(|e| {
         Error::new(
             ErrorKind::CuFileError,
@@ -597,14 +678,20 @@ fn init_cufile(path: &Path, flags: i32, _mode: u32) -> Result<(Arc<Cufile>, Cufi
     })?;
 
     use std::os::unix::fs::OpenOptionsExt;
-    // Derive read/write from the caller's O_* flags, and always add O_DIRECT.
+    // Derive read/write/append from the caller's O_* flags, and always add
+    // O_DIRECT. Truncation is NOT repeated here because the primary fd
+    // (fd_direct_off) has already been opened with the original flags —
+    // truncating again could race with writes on the first fd.
     let readable = flags & libc::O_WRONLY == 0; // O_RDONLY or O_RDWR
     let writable = flags & (libc::O_WRONLY | libc::O_RDWR) != 0;
+    let append = flags & libc::O_APPEND != 0;
     let file = std::fs::OpenOptions::new()
         .read(readable)
         .write(writable)
+        .append(append)
         .create(writable)
         .truncate(false)
+        .mode(mode)
         .custom_flags(libc::O_DIRECT)
         .open(path)
         .map_err(|e| {
