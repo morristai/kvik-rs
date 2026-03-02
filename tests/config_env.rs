@@ -2,6 +2,9 @@
 //!
 //! Mirrors C++ kvikio's `test_defaults.cpp` for environment variable parsing,
 //! alias handling, and edge cases.
+//!
+//! These tests modify process-wide environment variables via `EnvVarGuard`.
+//! A shared mutex serializes all env-mutating tests to prevent races.
 
 mod test_utils;
 
@@ -9,10 +12,18 @@ use kvik_rs::{CompatMode, Config, ErrorKind};
 
 use test_utils::EnvVarGuard;
 
+/// Serialize all env-mutating tests within this binary. `std::env::set_var` is
+/// not safe across concurrent threads, so we hold this lock for the duration of
+/// each test that uses `EnvVarGuard`.
+use std::sync::Mutex;
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+
 // ---- Test all environment variables ----
 
 #[test]
 fn test_env_compat_mode() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_COMPAT_MODE", "OFF")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.compat_mode, CompatMode::Off);
@@ -20,6 +31,7 @@ fn test_env_compat_mode() {
 
 #[test]
 fn test_env_nthreads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "8")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 8);
@@ -27,6 +39,7 @@ fn test_env_nthreads() {
 
 #[test]
 fn test_env_num_threads_alias() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NUM_THREADS", "16")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 16);
@@ -34,6 +47,7 @@ fn test_env_num_threads_alias() {
 
 #[test]
 fn test_env_task_size() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_TASK_SIZE", "8388608")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.task_size, 8 * 1024 * 1024);
@@ -41,6 +55,7 @@ fn test_env_task_size() {
 
 #[test]
 fn test_env_gds_threshold() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_GDS_THRESHOLD", "2097152")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.gds_threshold, 2 * 1024 * 1024);
@@ -48,6 +63,7 @@ fn test_env_gds_threshold() {
 
 #[test]
 fn test_env_bounce_buffer_size() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_BOUNCE_BUFFER_SIZE", "33554432")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.bounce_buffer_size, 32 * 1024 * 1024);
@@ -55,6 +71,7 @@ fn test_env_bounce_buffer_size() {
 
 #[test]
 fn test_env_auto_direct_io_read() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_AUTO_DIRECT_IO_READ", "false")]);
     let config = Config::from_env().unwrap();
     assert!(!config.auto_direct_io_read);
@@ -62,6 +79,7 @@ fn test_env_auto_direct_io_read() {
 
 #[test]
 fn test_env_auto_direct_io_write() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_AUTO_DIRECT_IO_WRITE", "no")]);
     let config = Config::from_env().unwrap();
     assert!(!config.auto_direct_io_write);
@@ -72,6 +90,7 @@ fn test_env_auto_direct_io_write() {
 #[test]
 fn test_conflicting_nthreads_aliases_same_value() {
     // Both set to the same value — should be OK, last one wins.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "4"), ("KVIKIO_NUM_THREADS", "4")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 4);
@@ -80,6 +99,7 @@ fn test_conflicting_nthreads_aliases_same_value() {
 #[test]
 fn test_conflicting_nthreads_aliases_different_values() {
     // Different values — KVIKIO_NUM_THREADS wins (checked second, overwrites first).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "4"), ("KVIKIO_NUM_THREADS", "8")]);
     let config = Config::from_env().unwrap();
     // KVIKIO_NUM_THREADS is checked after KVIKIO_NTHREADS, so it takes precedence.
@@ -90,6 +110,7 @@ fn test_conflicting_nthreads_aliases_different_values() {
 
 #[test]
 fn test_invalid_nthreads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", "abc")]);
     let err = Config::from_env().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConfigInvalid);
@@ -97,6 +118,7 @@ fn test_invalid_nthreads() {
 
 #[test]
 fn test_invalid_compat_mode() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_COMPAT_MODE", "invalid")]);
     let err = Config::from_env().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConfigInvalid);
@@ -104,6 +126,7 @@ fn test_invalid_compat_mode() {
 
 #[test]
 fn test_invalid_task_size_negative() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_TASK_SIZE", "-1")]);
     let err = Config::from_env().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConfigInvalid);
@@ -111,6 +134,7 @@ fn test_invalid_task_size_negative() {
 
 #[test]
 fn test_invalid_bool_value() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_AUTO_DIRECT_IO_READ", "maybe")]);
     let err = Config::from_env().unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConfigInvalid);
@@ -120,6 +144,7 @@ fn test_invalid_bool_value() {
 
 #[test]
 fn test_empty_env_values_use_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::new(&[("KVIKIO_NTHREADS", ""), ("KVIKIO_TASK_SIZE", "")]);
     let config = Config::from_env().unwrap();
     assert_eq!(config.num_threads, 1);
@@ -130,6 +155,7 @@ fn test_empty_env_values_use_defaults() {
 
 #[test]
 fn test_config_thread_safety() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let saved = Config::get();
 
     // Spawn multiple threads that read and write Config concurrently.
@@ -165,6 +191,7 @@ fn test_config_thread_safety() {
 
 #[test]
 fn test_config_set_get_roundtrip() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let saved = Config::get();
 
     let custom = Config {
@@ -210,7 +237,8 @@ fn test_bool_parsing_variants() {
         ("OFF", false),
         ("0", false),
     ] {
-        let _guard = EnvVarGuard::new(&[("KVIKIO_AUTO_DIRECT_IO_READ", value)]);
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvVarGuard::new(&[("KVIKIO_AUTO_DIRECT_IO_READ", value)]);
         let config = Config::from_env().unwrap();
         assert_eq!(
             config.auto_direct_io_read, *expected,
@@ -238,7 +266,8 @@ fn test_compat_mode_parsing_via_env() {
         ("AUTO", CompatMode::Auto),
         ("Auto", CompatMode::Auto),
     ] {
-        let _guard = EnvVarGuard::new(&[("KVIKIO_COMPAT_MODE", value)]);
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvVarGuard::new(&[("KVIKIO_COMPAT_MODE", value)]);
         let config = Config::from_env().unwrap();
         assert_eq!(
             config.compat_mode, *expected,
