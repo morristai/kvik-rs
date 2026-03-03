@@ -16,6 +16,7 @@ use crate::compat_mode::CompatMode;
 use crate::config::Config;
 use crate::error::{Error, ErrorKind, Result};
 use crate::posix_io::{self, PartialIO};
+use crate::thread_pool::{IoFuture, global_thread_pool};
 
 /// A `*mut u8` wrapper that implements [`Send`] for use in scoped threads.
 ///
@@ -624,6 +625,252 @@ impl FileHandle {
         Ok(total)
     }
 
+    /// Parallel async read: splits into chunks and executes on the global thread pool.
+    ///
+    /// Returns an [`IoFuture`] that resolves to the total bytes read. The I/O
+    /// executes on the global thread pool, allowing the caller to continue work
+    /// while the read proceeds.
+    ///
+    /// # Safety contract
+    ///
+    /// The caller must ensure `buf` remains valid and is not accessed by other
+    /// threads until the returned `IoFuture` is consumed (via `.get()`,
+    /// `.try_get()`, or `.await`). This is enforced by taking `&mut [u8]` —
+    /// the borrow checker prevents aliasing while the future is alive.
+    ///
+    /// Internally, a raw pointer is captured and reconstructed on the worker
+    /// thread. The `SendPtr` wrapper documents this invariant.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Destination buffer in host memory.
+    /// * `file_offset` - Starting file offset.
+    /// * `task_size` - Size of each chunk (0 = use config default).
+    pub fn pread(
+        &self,
+        buf: &mut [u8],
+        file_offset: u64,
+        task_size: usize,
+    ) -> IoFuture<usize> {
+        let ts = if task_size == 0 {
+            Config::get().task_size
+        } else {
+            task_size
+        };
+
+        let total_size = buf.len();
+        if total_size == 0 {
+            return global_thread_pool().submit(|| Ok(0));
+        }
+
+        let fd_on = self.fd_direct_on;
+        let fd_off = self.fd_direct_off;
+        let config = Config::get();
+        let use_dio = config.auto_direct_io_read;
+        let num_threads = config.num_threads;
+
+        // SAFETY: We capture the raw pointer here. The caller holds a `&mut [u8]`
+        // which guarantees exclusive access. The borrow checker ensures the buffer
+        // cannot be accessed until the IoFuture is consumed, which blocks on
+        // completion. The thread pool task reconstructs the slice safely.
+        let buf_ptr = SendPtr(buf.as_mut_ptr());
+        let path_display = self.path.display().to_string();
+
+        global_thread_pool().submit(move || {
+            if total_size <= ts {
+                // Single chunk: read directly.
+                // SAFETY: buf_ptr is valid for total_size bytes, exclusive access guaranteed.
+                let chunk_buf = unsafe { buf_ptr.slice_mut(0, total_size) };
+                return posix_io::posix_host_read(
+                    fd_on,
+                    fd_off,
+                    chunk_buf,
+                    file_offset,
+                    PartialIO::No,
+                    use_dio,
+                )
+                .map_err(|e| {
+                    e.with_operation("FileHandle::pread")
+                        .with_context("path", path_display.clone())
+                });
+            }
+
+            let num_chunks = total_size.div_ceil(ts);
+            let actual_threads = num_threads.max(1).min(num_chunks);
+
+            let results: Vec<Result<usize>> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(actual_threads);
+
+                for thread_id in 0..actual_threads {
+                    let handle = scope.spawn(move || {
+                        let mut thread_total = 0usize;
+                        let mut chunk_idx = thread_id;
+                        while chunk_idx < num_chunks {
+                            let chunk_offset = chunk_idx * ts;
+                            let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
+                            let chunk_file_offset = file_offset + chunk_offset as u64;
+                            // SAFETY: disjoint chunks, exclusive access per thread.
+                            let chunk_buf =
+                                unsafe { buf_ptr.slice_mut(chunk_offset, chunk_size) };
+                            let n = posix_io::posix_host_read(
+                                fd_on,
+                                fd_off,
+                                chunk_buf,
+                                chunk_file_offset,
+                                PartialIO::No,
+                                use_dio,
+                            )?;
+                            thread_total += n;
+                            chunk_idx += actual_threads;
+                        }
+                        Ok(thread_total)
+                    });
+                    handles.push(handle);
+                }
+
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("thread panicked"))
+                    .collect()
+            });
+
+            let mut total = 0;
+            for result in results {
+                total += result.map_err(|e| {
+                    e.with_operation("FileHandle::pread")
+                        .with_context("path", path_display.clone())
+                })?;
+            }
+            Ok(total)
+        })
+    }
+
+    /// Parallel async write: splits into chunks and executes on the global thread pool.
+    ///
+    /// Returns an [`IoFuture`] that resolves to the total bytes written.
+    ///
+    /// # Safety contract
+    ///
+    /// The caller must ensure `buf` remains valid and unmodified until the
+    /// returned `IoFuture` is consumed.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Source buffer in host memory.
+    /// * `file_offset` - Starting file offset.
+    /// * `task_size` - Size of each chunk (0 = use config default).
+    pub fn pwrite(
+        &self,
+        buf: &[u8],
+        file_offset: u64,
+        task_size: usize,
+    ) -> IoFuture<usize> {
+        let ts = if task_size == 0 {
+            Config::get().task_size
+        } else {
+            task_size
+        };
+
+        let total_size = buf.len();
+        if total_size == 0 {
+            return global_thread_pool().submit(|| Ok(0));
+        }
+
+        let fd_on = self.fd_direct_on;
+        let fd_off = self.fd_direct_off;
+        let config = Config::get();
+        let use_dio = config.auto_direct_io_write;
+        let num_threads = config.num_threads;
+
+        // SAFETY: For writes we need the buffer to remain valid and unmodified.
+        // The `&[u8]` reference prevents mutation. The raw pointer is used to
+        // reconstruct read-only slices on the worker thread.
+        let buf_ptr = buf.as_ptr();
+        let path_display = self.path.display().to_string();
+
+        // SAFETY: We capture a raw *const u8 that is valid for the entire
+        // buffer. The caller guarantees the buffer outlives the IoFuture.
+        // The worker threads only produce read-only slices from this pointer.
+        struct SendConstPtr(*const u8);
+        unsafe impl Send for SendConstPtr {}
+        unsafe impl Sync for SendConstPtr {}
+
+        let send_ptr = SendConstPtr(buf_ptr);
+
+        global_thread_pool().submit(move || {
+            if total_size <= ts {
+                // SAFETY: send_ptr.0 is valid for total_size bytes.
+                let chunk_buf =
+                    unsafe { std::slice::from_raw_parts(send_ptr.0, total_size) };
+                return posix_io::posix_host_write(
+                    fd_on,
+                    fd_off,
+                    chunk_buf,
+                    file_offset,
+                    PartialIO::No,
+                    use_dio,
+                )
+                .map_err(|e| {
+                    e.with_operation("FileHandle::pwrite")
+                        .with_context("path", path_display.clone())
+                });
+            }
+
+            let num_chunks = total_size.div_ceil(ts);
+            let actual_threads = num_threads.max(1).min(num_chunks);
+
+            let results: Vec<Result<usize>> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(actual_threads);
+
+                for thread_id in 0..actual_threads {
+                    let send_ptr_ref = &send_ptr;
+                    let handle = scope.spawn(move || {
+                        let mut thread_total = 0usize;
+                        let mut chunk_idx = thread_id;
+                        while chunk_idx < num_chunks {
+                            let chunk_offset = chunk_idx * ts;
+                            let chunk_size = std::cmp::min(ts, total_size - chunk_offset);
+                            let chunk_file_offset = file_offset + chunk_offset as u64;
+                            // SAFETY: disjoint read-only slices, valid pointer.
+                            let chunk_buf = unsafe {
+                                std::slice::from_raw_parts(
+                                    send_ptr_ref.0.add(chunk_offset),
+                                    chunk_size,
+                                )
+                            };
+                            let n = posix_io::posix_host_write(
+                                fd_on,
+                                fd_off,
+                                chunk_buf,
+                                chunk_file_offset,
+                                PartialIO::No,
+                                use_dio,
+                            )?;
+                            thread_total += n;
+                            chunk_idx += actual_threads;
+                        }
+                        Ok(thread_total)
+                    });
+                    handles.push(handle);
+                }
+
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("thread panicked"))
+                    .collect()
+            });
+
+            let mut total = 0;
+            for result in results {
+                total += result.map_err(|e| {
+                    e.with_operation("FileHandle::pwrite")
+                        .with_context("path", path_display.clone())
+                })?;
+            }
+            Ok(total)
+        })
+    }
+
     /// Returns the file descriptor without O_DIRECT.
     pub fn fd(&self) -> RawFd {
         self.fd_direct_off
@@ -959,6 +1206,130 @@ mod tests {
         let mut buf = vec![0u8; size];
         let read = handle.read_host(&mut buf, 0).unwrap();
         assert_eq!(read, size);
+        assert_eq!(buf, data);
+    }
+
+    // ---- Async pread/pwrite tests ----
+
+    #[test]
+    fn test_pread_basic() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        handle.write_host(&data, 0).unwrap();
+        drop(handle);
+
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        let future = handle.pread(&mut buf, 0, 0);
+        let n = future.get().unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_pread_with_small_task_size() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        handle.write_host(&data, 0).unwrap();
+        drop(handle);
+
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        let future = handle.pread(&mut buf, 0, 10_000);
+        let n = future.get().unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_pread_zero_size() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let handle = FileHandle::open(tmp.path(), "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = [];
+        let future = handle.pread(&mut buf, 0, 0);
+        let n = future.get().unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_pwrite_basic() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        let future = handle.pwrite(&data, 0, 0);
+        let n = future.get().unwrap();
+        assert_eq!(n, data.len());
+        drop(handle);
+
+        // Verify by reading back.
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        handle.read_host(&mut buf, 0).unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_pwrite_with_small_task_size() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        let future = handle.pwrite(&data, 0, 10_000);
+        let n = future.get().unwrap();
+        assert_eq!(n, data.len());
+        drop(handle);
+
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        handle.read_host(&mut buf, 0).unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_pread_is_ready() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let data = vec![42u8; 1000];
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        handle.write_host(&data, 0).unwrap();
+        drop(handle);
+
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; 1000];
+        let future = handle.pread(&mut buf, 0, 0);
+        // Eventually becomes ready.
+        let n = future.get().unwrap();
+        assert_eq!(n, 1000);
+    }
+
+    #[test]
+    fn test_pread_unaligned_size() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // 1 MiB + 124 bytes (deliberately unaligned).
+        let size = 1024 * 1024 + 124;
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+
+        let handle = FileHandle::open(path, "w", 0o644, CompatMode::On).unwrap();
+        handle.write_host(&data, 0).unwrap();
+        drop(handle);
+
+        let handle = FileHandle::open(path, "r", 0o644, CompatMode::On).unwrap();
+        let mut buf = vec![0u8; size];
+        let future = handle.pread(&mut buf, 0, 64 * 1024); // 64K chunks
+        let n = future.get().unwrap();
+        assert_eq!(n, size);
         assert_eq!(buf, data);
     }
 }

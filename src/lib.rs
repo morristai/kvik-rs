@@ -32,8 +32,10 @@ pub mod config;
 pub mod error;
 pub mod file_handle;
 pub mod posix_io;
+pub mod thread_pool;
 
 pub use compat_mode::CompatMode;
 pub use config::Config;
 pub use error::{Error, ErrorKind, ErrorStatus, Result};
 pub use file_handle::FileHandle;
+pub use thread_pool::{IoFuture, IoThreadPool};
