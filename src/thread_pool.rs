@@ -274,12 +274,20 @@ impl IoThreadPool {
     /// After shutdown, `submit()` will panic. Multiple shutdowns are safe.
     pub fn shutdown(&self) {
         // Drop the sender to signal workers to exit.
+        // Use `lock()` with poison recovery — the mutex may be poisoned if a
+        // previous operation panicked (e.g., submit after shutdown in a test).
         {
-            let mut sender = self.sender.lock().expect("thread pool sender poisoned");
+            let mut sender = self
+                .sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             sender.take();
         }
         // Join all workers.
-        let mut workers = self.workers.lock().expect("thread pool workers poisoned");
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for handle in workers.drain(..) {
             handle.join().ok();
         }
@@ -515,6 +523,192 @@ mod tests {
         let pool = global_thread_pool();
         let future = pool.submit(|| Ok(99usize));
         assert_eq!(future.get().unwrap(), 99);
+    }
+
+    // ---- Oneshot edge cases ----
+
+    #[test]
+    fn test_oneshot_try_recv_consumed_returns_none() {
+        let (tx, rx) = oneshot::<i32>();
+        tx.send(42);
+        assert_eq!(rx.try_recv(), Some(42));
+        // Value already taken, is_ready still true but slot is empty.
+        assert!(rx.is_ready());
+        assert_eq!(rx.try_recv(), None);
+    }
+
+    #[test]
+    fn test_oneshot_drop_sender_before_send() {
+        let (tx, rx) = oneshot::<i32>();
+        drop(tx);
+        // Receiver still exists but no value will arrive.
+        assert!(!rx.is_ready());
+        assert!(rx.try_recv().is_none());
+        // Dropping receiver should not panic.
+        drop(rx);
+    }
+
+    #[test]
+    fn test_oneshot_drop_receiver_before_send() {
+        let (tx, _rx) = oneshot::<i32>();
+        // Sending to a dropped receiver should not panic
+        // (the value is just placed into the shared state).
+        tx.send(99);
+    }
+
+    #[test]
+    fn test_oneshot_large_payload() {
+        let (tx, rx) = oneshot::<Vec<u8>>();
+        let big = vec![0xAB; 10_000_000]; // 10 MB
+        tx.send(big.clone());
+        let received = rx.recv();
+        assert_eq!(received.len(), 10_000_000);
+        assert_eq!(received, big);
+    }
+
+    #[test]
+    fn test_oneshot_with_zero_sized_type() {
+        let (tx, rx) = oneshot::<()>();
+        tx.send(());
+        assert_eq!(rx.recv(), ());
+    }
+
+    // ---- IoFuture edge cases ----
+
+    #[test]
+    fn test_io_future_try_get_consumed_returns_none() {
+        let pool = IoThreadPool::new(1);
+        let mut future = pool.submit(|| Ok(42usize));
+        // Wait for result.
+        while !future.is_ready() {
+            std::thread::yield_now();
+        }
+        let first = future.try_get();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().unwrap(), 42);
+        // Second call returns None.
+        assert!(future.try_get().is_none());
+        // is_ready is still true (the flag is set) but value is consumed.
+        assert!(future.is_ready());
+    }
+
+    #[test]
+    fn test_io_future_drop_before_result_ready() {
+        let pool = IoThreadPool::new(1);
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let g = Arc::clone(&gate);
+
+        let future = pool.submit(move || {
+            g.wait(); // Block until we release.
+            Ok(99usize)
+        });
+
+        // Drop the future while the task is still blocked.
+        drop(future);
+
+        // Release the task.
+        gate.wait();
+
+        // Pool should still work.
+        let result = pool.submit(|| Ok(1usize)).get().unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_io_future_try_get_then_is_ready() {
+        // After try_get consumes the value, is_ready() is still true
+        // (the AtomicBool flag is set) but the value slot is empty.
+        let (tx, rx) = oneshot();
+        let mut future = IoFuture::<usize> {
+            #[cfg(feature = "futures")]
+            shared: Arc::clone(&rx.shared),
+            receiver: Some(rx),
+        };
+
+        tx.send(Ok(10));
+        assert!(future.is_ready());
+
+        // Consume via try_get.
+        let val = future.try_get().unwrap().unwrap();
+        assert_eq!(val, 10);
+
+        // is_ready is still true (flag was set), but value is gone.
+        assert!(future.is_ready());
+        assert!(future.try_get().is_none());
+    }
+
+    // ---- IoThreadPool edge cases ----
+
+    #[test]
+    fn test_pool_many_tasks_single_thread() {
+        let pool = IoThreadPool::new(1);
+        let futures: Vec<_> = (0..500)
+            .map(|i| pool.submit(move || Ok(i)))
+            .collect();
+        for (i, f) in futures.into_iter().enumerate() {
+            assert_eq!(f.get().unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn test_pool_more_threads_than_tasks() {
+        let pool = IoThreadPool::new(32);
+        let futures: Vec<_> = (0..3)
+            .map(|i| pool.submit(move || Ok(i * 10)))
+            .collect();
+        for (i, f) in futures.into_iter().enumerate() {
+            assert_eq!(f.get().unwrap(), i * 10);
+        }
+    }
+
+    #[test]
+    fn test_pool_rapid_submit_get_cycles() {
+        let pool = IoThreadPool::new(2);
+        for i in 0..200 {
+            let result = pool.submit(move || Ok(i)).get().unwrap();
+            assert_eq!(result, i);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "thread pool is shut down")]
+    fn test_pool_submit_after_shutdown() {
+        let pool = IoThreadPool::new(1);
+        pool.shutdown();
+        let _f = pool.submit(|| Ok(0usize));
+    }
+
+    #[test]
+    fn test_pool_drop_with_pending_futures() {
+        let futures: Vec<IoFuture<usize>>;
+        {
+            let pool = IoThreadPool::new(4);
+            futures = (0..20)
+                .map(|i| pool.submit(move || Ok(i)))
+                .collect();
+            // Pool dropped here → shutdown → join workers.
+        }
+        // All futures should be resolvable.
+        for (i, f) in futures.into_iter().enumerate() {
+            assert_eq!(f.get().unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn test_pool_task_panic_other_tasks_still_work() {
+        let pool = IoThreadPool::new(2);
+
+        // Submit a panicking task — don't call get().
+        let _bad = pool.submit(|| -> Result<usize> {
+            panic!("boom");
+        });
+
+        // Give time for the panic to propagate.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Other tasks should still work (remaining worker picks them up).
+        let r = pool.submit(|| Ok(7usize)).get().unwrap();
+        assert_eq!(r, 7);
     }
 
     // ---- futures feature tests ----
